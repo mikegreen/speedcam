@@ -14,12 +14,20 @@ import torch
 VEHICLE_CLASSES = [2, 3, 5, 7]  # COCO classes for car, motorcycle, bus, truck
 CONFIDENCE_THRESHOLD = 0.5
 TRACK_MAX_AGE = 30 # Frames a track can exist without detection
+MIN_DISPLAY_SPEED_MPH = 3.0 # Minimum speed (mph) to display on the label
 
 # --- Speed Estimation Parameters (NEEDS CALIBRATION) ---
 # This is now configured for HORIZONTAL movement (left/right across the frame).
 # You MUST calibrate these based on your camera setup and a known distance.
 # Define pixels per meter HORIZONTALLY at a reference line/area.
-PIXELS_PER_METER_HORIZONTAL = 53.74 # Example value: Adjust this! Calibrate based on a known horizontal distance.
+## for 1920x1080 res:
+# PIXELS_PER_METER_HORIZONTAL = 53.74 # Example value: Adjust this! Calibrate based on a known horizontal distance.
+## for 1024x574 res:
+# PIXELS_PER_METER_HORIZONTAL = 29.22
+# below calc'd on Tesla model 3 in middle of road
+# T3 = 185" long, in image was 174px wide. 185/174 = 1.077, 1.077 * 39.3701 = 41.85
+PIXELS_PER_METER_HORIZONTAL = 41.85
+## PIXELS_PER_METER_HORIZONTAL = 26.87 # Example value: Adjust this! Calibrate based on a known horizontal distance.
 # REAL_HORIZONTAL_DISTANCE_METERS = 5.0 # e.g., width of a lane
 # PIXEL_HORIZONTAL_DISTANCE = 100 # Pixel distance corresponding to REAL_HORIZONTAL_DISTANCE_METERS
 
@@ -90,8 +98,13 @@ def main(rtsp_url, model_path, device):
             annotated_frame = results[0].plot()
 
             frame_height, frame_width, _ = annotated_frame.shape
+            # Original broad zone for speed calculation
             left_bound = frame_width * 0.20
             right_bound = frame_width * 0.80
+            # Narrow zone specifically for triggering the snapshot
+            snapshot_center_margin = 0.08 # +/- 8% around the center
+            snapshot_left_bound = frame_width * (0.5 - snapshot_center_margin)
+            snapshot_right_bound = frame_width * (0.5 + snapshot_center_margin)
 
             for box, track_id, conf, cls_id in zip(boxes, ids, confs, clss):
                 x1, y1, x2, y2 = box
@@ -106,7 +119,9 @@ def main(rtsp_url, model_path, device):
                     track_history[track_id].pop(0)
 
                 speed_mph = 0.0
-                is_in_center_zone = left_bound <= center_x <= right_bound
+                is_in_center_zone = left_bound <= center_x <= right_bound # Broad zone for speed calc
+                is_at_exact_center = snapshot_left_bound <= center_x <= snapshot_right_bound # Narrow zone for snapshot
+
                 if len(track_history[track_id]) >= 2 and is_in_center_zone:
                     prev_point = track_history[track_id][-2]
                     curr_point = track_history[track_id][-1]
@@ -124,7 +139,7 @@ def main(rtsp_url, model_path, device):
 
                 # --- Draw Speed Info FIRST ---
                 label = f"ID:{track_id}"
-                if speed_mph > 0.1: # Only add speed if it was calculated and is non-trivial
+                if speed_mph > MIN_DISPLAY_SPEED_MPH: # Only add speed if it's above the display threshold
                     label += f" {speed_mph:.1f} mph"
 
                 (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -133,9 +148,12 @@ def main(rtsp_url, model_path, device):
                 cv2.putText(annotated_frame, label, (x1, y1 - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
-                # --- Save Snapshot --- (If in center zone, not already saved, AND speed > 7 MPH)
-                if is_in_center_zone and track_id not in snapshot_saved_ids:
-                    # Check speed *before* deciding to save (using the already calculated speed_mph)
+                # --- DEBUG PRINT ---
+                print(f"Debug - ID: {track_id}, Center Zone: {is_in_center_zone}, At Exact Center: {is_at_exact_center}, Speed: {speed_mph:.2f} mph, Already Saved: {track_id in snapshot_saved_ids}")
+
+                # --- Save Snapshot --- (If AT THE CENTER, speed > 7 MPH, and not already saved)
+                if is_at_exact_center and track_id not in snapshot_saved_ids:
+                    # Check speed *before* deciding to save (using the speed_mph calculated when in the broad zone)
                     if speed_mph > 7.0: # Check the calculated mph speed
                         # Create directory if it doesn't exist
                         os.makedirs(SNAPSHOT_DIR, exist_ok=True)
